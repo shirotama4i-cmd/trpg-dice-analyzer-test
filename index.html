@@ -158,7 +158,7 @@
 </head>
 <body>
 
-    <h1>🎲 ココフォリア・ダイスログ分析ツール・test</h1>
+    <h1>🎲 ココフォリア・ダイスログ分析ツール/test</h1>
     
     <div class="drop-zone" id="dropZone">
         ここにココフォリアのログファイル（HTML）をドラッグ＆ドロップするか、<br>
@@ -245,7 +245,6 @@
             const pTags = doc.querySelectorAll('p');
             
             const rawRecords = [];
-            // キャラクターごとの「チャットのみも含めた全発言数」を数えるためのカウンター
             const totalChatCounter = {};
             
             pTags.forEach(p => {
@@ -256,7 +255,6 @@
                 const rawName = spans[1].textContent.trim();
                 const content = spans[2].textContent.trim();
                 
-                // 全発言数をカウント
                 if (rawName) {
                     totalChatCounter[rawName] = (totalChatCounter[rawName] || 0) + 1;
                 }
@@ -288,60 +286,79 @@
             }
 
             const charMap = groupByFlexibleName(rawRecords);
-            
-            // 名寄せされた後の「確定した代表名」ベースで全発言数を再集計する
-            const unifiedChatCounter = {};
-            // 名寄せロジックの簡易マッピングを再現
             const uniqueNames = Object.keys(charMap).sort((a,b) => b.length - a.length);
+            const unifiedChatCounter = {};
             
             Object.keys(totalChatCounter).forEach(rawName => {
                 const unifiedName = uniqueNames.find(uName => rawName.includes(uName) || uName.includes(rawName)) || rawName;
                 unifiedChatCounter[unifiedName] = (unifiedChatCounter[unifiedName] || 0) + totalChatCounter[rawName];
             });
 
+            // 全キャラクターの基礎データ配列を作成
+            const analyzedCharacters = Object.keys(charMap).map(char => {
+                const charList = charMap[char];
+                const d100List = charList.filter(r => r.is1d100);
+                
+                const criticalCount = d100List.filter(r => /クリティカル|決定的成功/.test(r.diceResult)).length;
+                const fumbleCount = d100List.filter(r => /ファンブル|致命的失敗/.test(r.diceResult)).length;
+
+                // 振った固有技能の種類数をカウント（目星、聞き耳、など何種類振ったか）
+                const uniqueSkills = new Set(charList.map(r => r.skillName).filter(s => s !== "素振り/その他"));
+                const skillVarietyCount = uniqueSkills.size;
+
+                // システムやKP名の判定
+                const isSystemOrKP = /^(KP|GM|SYSTEM|システム|シークレット|進行)/i.test(char);
+                const hasHOTab = charList.some(r => /HO\d+/i.test(r.channel));
+
+                // ★ PCらしさのスコアリングシステム（多角的に評価）
+                let pcScore = 0;
+                if (!isSystemOrKP) {
+                    if (hasHOTab) pcScore += 100; // HO個別タブ発言があれば超高確率でPC
+                    pcScore += d100List.length * 1.5; // 1D100を多く振るほど加点
+                    pcScore += skillVarietyCount * 5.0; // 多彩な技能を使うほどPCの可能性大（NPCは特定の攻撃しかしないため）
+                    pcScore += (criticalCount + fumbleCount) * 2.0; // ドラマを起こしているか
+                }
+
+                return {
+                    name: char,
+                    list: charList,
+                    d100List: d100List,
+                    criticalCount: criticalCount,
+                    fumbleCount: fumbleCount,
+                    skillVarietyCount: skillVarietyCount,
+                    pcScore: pcScore,
+                    isSystemOrKP: isSystemOrKP
+                };
+            });
+
+            // システム系ではなく、かつ1D100を1回以上振っているキャラの中で、スコアが上位のものをPCの候補にする
+            const candidates = analyzedCharacters.filter(c => !c.isSystemOrKP && c.d100List.length > 0);
+            
+            // スコアの高い順に並び替え
+            candidates.sort((a, b) => b.pcScore - a.pcScore);
+
+            // 通常、TRPGのプレイヤー（PC）は多くても2〜5人（HOセッションなら2〜4人が主流）
+            // スコア上位4人、または上位に肉薄する高スコアキャラをPC枠とし、それ以外をNPCとする
+            let pcThreshold = 0;
+            if (candidates.length > 0) {
+                // 上位最大4名の平均スコアの半分を足切りラインとする（極端にスコアが低い敵NPCを弾く）
+                const topGroup = candidates.slice(0, 4);
+                const avgTopScore = topGroup.reduce((sum, c) => sum + c.pcScore, 0) / topGroup.length;
+                pcThreshold = avgTopScore * 0.4; // 平均の40%以上のスコアを持っていればPC枠
+            }
+
+            // 各キャラクターに最終的なPCフラグを付与
+            const finalCharacters = analyzedCharacters.map(c => {
+                let isPC = false;
+                if (!c.isSystemOrKP && c.d100List.length > 0 && c.pcScore >= pcThreshold) {
+                    isPC = true;
+                }
+                return { ...c, isPC };
+            });
+
             currentAnalysisData = {
                 totalCount: rawRecords.length,
-                characters: Object.keys(charMap).map(char => {
-                    const charList = charMap[char];
-                    const d100List = charList.filter(r => r.is1d100);
-                    
-                    const criticalCount = d100List.filter(r => /クリティカル|決定的成功/.test(r.diceResult)).length;
-                    const fumbleCount = d100List.filter(r => /ファンブル|致命的失敗/.test(r.diceResult)).length;
-
-                    // ★ 新・PCとNPCの自動判別ロジック
-                    const totalSpeech = unifiedChatCounter[char] || charList.length;
-                    const diceCount = charList.length;
-                    
-                    // KPやシステムメッセージ系は確実に除外
-                    const isSystemOrKP = /^(KP|GM|SYSTEM|システム|シークレット|進行)/i.test(char);
-                    
-                    // 秘匿タブ[HO1]などを使っている場合は無条件でPC
-                    const hasHOTab = charList.some(r => /HO\d+/i.test(r.channel));
-                    
-                    // ダイス発言率（ダイス数 ÷ 総発言数）
-                    // 敵NPCは会話をせずダイスだけ振るため、この比率が100%に近くなる
-                    // プレイヤー(PC)は会話(RP)が多いため、比率が適度に低くなる
-                    const diceRatio = diceCount / totalSpeech;
-
-                    let isPC = false;
-                    if (!isSystemOrKP) {
-                        if (hasHOTab) {
-                            isPC = true;
-                        } else if (d100List.length > 0 && diceRatio < 0.85) {
-                            // 1D100を1回以上振っており、かつ全発言のうちダイス以外（RPや雑談）が15%以上あるキャラクターをPCとする
-                            isPC = true;
-                        }
-                    }
-
-                    return {
-                        name: char,
-                        list: charList,
-                        d100List: d100List,
-                        criticalCount: criticalCount,
-                        fumbleCount: fumbleCount,
-                        isPC: isPC 
-                    };
-                })
+                characters: finalCharacters
             };
 
             generateReport('default');
