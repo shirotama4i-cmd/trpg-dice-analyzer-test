@@ -242,12 +242,16 @@
         function analyzeLog(htmlText) {
             const parser = new DOMParser();
             const doc = parser.parseFromString(htmlText, 'text/html');
-            const pTags = doc.querySelectorAll('p');
+            const pTags = Array.from(doc.querySelectorAll('p'));
             
+            const totalLines = pTags.length;
+            const sizePerPhase = Math.ceil(totalLines / 3); // ログを3分割する
+
             const rawRecords = [];
-            const totalChatCounter = {};
+            // 各キャラがどのフェーズ(0, 1, 2)で発言したかを記録するセット
+            const charActivePhases = {}; 
             
-            pTags.forEach(p => {
+            pTags.forEach((p, index) => {
                 const spans = p.querySelectorAll('span');
                 if (spans.length < 3) return;
                 
@@ -255,8 +259,14 @@
                 const rawName = spans[1].textContent.trim();
                 const content = spans[2].textContent.trim();
                 
+                // 現在の行が前半(0)・中盤(1)・後半(2)のどこに属するか計算
+                const currentPhase = Math.min(Math.floor(index / sizePerPhase), 2);
+
                 if (rawName) {
-                    totalChatCounter[rawName] = (totalChatCounter[rawName] || 0) + 1;
+                    if (!charActivePhases[rawName]) {
+                        charActivePhases[rawName] = new Set();
+                    }
+                    charActivePhases[rawName].add(currentPhase);
                 }
 
                 if (content.includes('＞')) {
@@ -287,14 +297,17 @@
 
             const charMap = groupByFlexibleName(rawRecords);
             const uniqueNames = Object.keys(charMap).sort((a,b) => b.length - a.length);
-            const unifiedChatCounter = {};
             
-            Object.keys(totalChatCounter).forEach(rawName => {
+            // 名寄せした後の名前ベースでアクティブフェーズを統合する
+            const unifiedPhases = {};
+            Object.keys(charActivePhases).forEach(rawName => {
                 const unifiedName = uniqueNames.find(uName => rawName.includes(uName) || uName.includes(rawName)) || rawName;
-                unifiedChatCounter[unifiedName] = (unifiedChatCounter[unifiedName] || 0) + totalChatCounter[rawName];
+                if (!unifiedPhases[unifiedName]) {
+                    unifiedPhases[unifiedName] = new Set();
+                }
+                charActivePhases[rawName].forEach(p => unifiedPhases[unifiedName].add(p));
             });
 
-            // 全キャラクターの基礎データ配列を作成
             const analyzedCharacters = Object.keys(charMap).map(char => {
                 const charList = charMap[char];
                 const d100List = charList.filter(r => r.is1d100);
@@ -302,21 +315,29 @@
                 const criticalCount = d100List.filter(r => /クリティカル|決定的成功/.test(r.diceResult)).length;
                 const fumbleCount = d100List.filter(r => /ファンブル|致命的失敗/.test(r.diceResult)).length;
 
-                // 振った固有技能の種類数をカウント（目星、聞き耳、など何種類振ったか）
                 const uniqueSkills = new Set(charList.map(r => r.skillName).filter(s => s !== "素振り/その他"));
                 const skillVarietyCount = uniqueSkills.size;
 
-                // システムやKP名の判定
                 const isSystemOrKP = /^(KP|GM|SYSTEM|システム|シークレット|進行)/i.test(char);
                 const hasHOTab = charList.some(r => /HO\d+/i.test(r.channel));
 
-                // ★ PCらしさのスコアリングシステム（多角的に評価）
-                let pcScore = 0;
+                // ★ アクティブ率（出現フェーズ数：1〜3）を取得
+                const activePhaseCount = unifiedPhases[char] ? unifiedPhases[char].size : 1;
+
+                // 基礎スコア計算
+                let baseScore = 0;
                 if (!isSystemOrKP) {
-                    if (hasHOTab) pcScore += 100; // HO個別タブ発言があれば超高確率でPC
-                    pcScore += d100List.length * 1.5; // 1D100を多く振るほど加点
-                    pcScore += skillVarietyCount * 5.0; // 多彩な技能を使うほどPCの可能性大（NPCは特定の攻撃しかしないため）
-                    pcScore += (criticalCount + fumbleCount) * 2.0; // ドラマを起こしているか
+                    if (hasHOTab) baseScore += 50; 
+                    baseScore += d100List.length * 1.0; 
+                    baseScore += skillVarietyCount * 4.0; 
+                    baseScore += (criticalCount + fumbleCount) * 1.5;
+                }
+
+                // ★ アクティブ率を乗算（3フェーズ全てにいれば3倍、戦闘だけのボスは1倍）
+                // さらに、全期間に存在した（3フェーズすべてにいた）場合は一律ボーナス
+                let pcScore = baseScore * activePhaseCount;
+                if (activePhaseCount === 3) {
+                    pcScore += 30; 
                 }
 
                 return {
@@ -326,31 +347,29 @@
                     criticalCount: criticalCount,
                     fumbleCount: fumbleCount,
                     skillVarietyCount: skillVarietyCount,
+                    activePhaseCount: activePhaseCount,
                     pcScore: pcScore,
                     isSystemOrKP: isSystemOrKP
                 };
             });
 
-            // システム系ではなく、かつ1D100を1回以上振っているキャラの中で、スコアが上位のものをPCの候補にする
+            // 1D100を1回以上振り、かつシステム系でない候補
             const candidates = analyzedCharacters.filter(c => !c.isSystemOrKP && c.d100List.length > 0);
-            
-            // スコアの高い順に並び替え
             candidates.sort((a, b) => b.pcScore - a.pcScore);
 
-            // 通常、TRPGのプレイヤー（PC）は多くても2〜5人（HOセッションなら2〜4人が主流）
-            // スコア上位4人、または上位に肉薄する高スコアキャラをPC枠とし、それ以外をNPCとする
             let pcThreshold = 0;
             if (candidates.length > 0) {
-                // 上位最大4名の平均スコアの半分を足切りラインとする（極端にスコアが低い敵NPCを弾く）
+                // 上位4名の平均スコアをベースにする
                 const topGroup = candidates.slice(0, 4);
                 const avgTopScore = topGroup.reduce((sum, c) => sum + c.pcScore, 0) / topGroup.length;
-                pcThreshold = avgTopScore * 0.4; // 平均の40%以上のスコアを持っていればPC枠
+                // 足切り判定基準ライン
+                pcThreshold = avgTopScore * 0.5; 
             }
 
-            // 各キャラクターに最終的なPCフラグを付与
             const finalCharacters = analyzedCharacters.map(c => {
                 let isPC = false;
-                if (!c.isSystemOrKP && c.d100List.length > 0 && c.pcScore >= pcThreshold) {
+                // 1D100を振っており、閾値を超え、かつ「最低でも2つ以上のフェーズ」に登場していること
+                if (!c.isSystemOrKP && c.d100List.length > 0 && c.pcScore >= pcThreshold && c.activePhaseCount >= 2) {
                     isPC = true;
                 }
                 return { ...c, isPC };
@@ -449,7 +468,7 @@
                             const pct = (count / d100List.length) * 100;
                             
                             let rowClass = "";
-                            if (/クリティカル|決定的成功/.test(k)) rowClass = ' class="highlight-good"';
+                            if (/クリティカル|決決定的成功/.test(k)) rowClass = ' class="highlight-good"';
                             if (/ファンブル|致命的失敗/.test(k)) rowClass = ' class="highlight-bad"';
 
                             blockHtml += `    <tr${rowClass}><td>${k}</td><td>${count}回</td><td>${pct.toFixed(1)}%</td></tr>`;
