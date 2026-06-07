@@ -210,20 +210,31 @@
         }
 
         function groupByFlexibleName(rawRecords) {
+            // 全てのユニークな名前を取得
             const uniqueNames = Array.from(new Set(rawRecords.map(r => r.rawName)))
-                                     .filter(name => name.length > 0)
-                                     .sort((a, b) => b.length - a.length);
+                                     .filter(name => name.length > 0);
 
             const nameMapping = {};
+
+            // 名前からカッコとその中身（全角・半角両方）を一時的に除去するヘルパー関数
+            // 例: "お助けNPC(戦闘時)" -> "お助けNPC" / "探索者A（一時的狂気）" -> "探索者A"
+            const getBaseName = (name) => {
+                return name.replace(/[（\(].*?[）\)]/g, '').trim();
+            };
 
             uniqueNames.forEach(name => {
                 if (nameMapping[name]) return;
 
+                const baseName = getBaseName(name);
+
+                // ベースの名前が一致するものをグループ化する
                 const targetGroup = uniqueNames.filter(otherName => {
-                    return name.includes(otherName) || otherName.includes(name);
+                    return getBaseName(otherName) === baseName;
                 });
 
-                const representativeName = targetGroup[0];
+                // グループの中で一番文字数が長い名前（または元の名前）を代表名にする
+                const representativeName = [...targetGroup].sort((a, b) => b.length - a.length)[0];
+                
                 targetGroup.forEach(gName => {
                     nameMapping[gName] = representativeName;
                 });
@@ -428,7 +439,7 @@
             fileInfo.textContent = "解析が完了しました！";
         }
 
-        function buildCharacterBlockHTML(charData) {
+function buildCharacterBlockHTML(charData) {
             const RESULT_ORDER = [
                 "クリティカル", "決定的成功", "イクストリーム成功", "ハード成功", 
                 "スペシャル", "成功", "失敗", "致命的失敗", "ファンブル"
@@ -468,7 +479,8 @@
                             const pct = (count / d100List.length) * 100;
                             
                             let rowClass = "";
-                            if (/クリティカル|決決定的成功/.test(k)) rowClass = ' class="highlight-good"';
+                            // ★「決決定的成功」になっていたタイポを「決定的成功」に修正しました
+                            if (/クリティカル|決定的成功/.test(k)) rowClass = ' class="highlight-good"';
                             if (/ファンブル|致命的失敗/.test(k)) rowClass = ' class="highlight-bad"';
 
                             blockHtml += `    <tr${rowClass}><td>${k}</td><td>${count}回</td><td>${pct.toFixed(1)}%</td></tr>`;
