@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>ココフォリア・ダイスログ分析ツール（テスト環境）</title>
+    <title>ココフォリア・ダイスログ分析ツール</title>
     <style>
         body {
             font-family: 'Helvetica Neue', Arial, sans-serif;
@@ -56,7 +56,6 @@
             margin-bottom: 15px;
             color: #555;
         }
-        /* ソートボタンエリアのスタイル */
         .sort-actions {
             margin-bottom: 25px;
             display: flex;
@@ -83,6 +82,22 @@
             background-color: #3498db;
             color: #fff;
             border-color: #3498db;
+        }
+        .category-heading {
+            font-size: 18px;
+            font-weight: bold;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            padding: 8px 12px;
+            background-color: #e2e8f0;
+            color: #1e293b;
+            border-radius: 4px;
+            border-left: 6px solid #475569;
+        }
+        .category-heading.pc-type {
+            background-color: #e0f2fe;
+            color: #0369a1;
+            border-left-color: #0284c7;
         }
         .char-block {
             background-color: #fafbfc;
@@ -143,7 +158,7 @@
 </head>
 <body>
 
-    <h1>🎲 ココフォリア・ダイスログ分析ツール（テスト環境）</h1>
+    <h1>🎲 ココフォリア・ダイスログ分析ツール・test</h1>
     
     <div class="drop-zone" id="dropZone">
         ここにココフォリアのログファイル（HTML）をドラッグ＆ドロップするか、<br>
@@ -160,7 +175,6 @@
         const output = document.getElementById('output');
         const fileInfo = document.getElementById('fileInfo');
 
-        // グローバル変数として解析結果データを保持（ソート時に再利用するため）
         let currentAnalysisData = null; 
 
         dropZone.addEventListener('click', () => fileInput.click());
@@ -231,6 +245,8 @@
             const pTags = doc.querySelectorAll('p');
             
             const rawRecords = [];
+            // キャラクターごとの「チャットのみも含めた全発言数」を数えるためのカウンター
+            const totalChatCounter = {};
             
             pTags.forEach(p => {
                 const spans = p.querySelectorAll('span');
@@ -240,6 +256,11 @@
                 const rawName = spans[1].textContent.trim();
                 const content = spans[2].textContent.trim();
                 
+                // 全発言数をカウント
+                if (rawName) {
+                    totalChatCounter[rawName] = (totalChatCounter[rawName] || 0) + 1;
+                }
+
                 if (content.includes('＞')) {
                     const parts = content.split('＞').map(x => x.trim());
                     const diceExpr = parts[0];
@@ -268,32 +289,64 @@
 
             const charMap = groupByFlexibleName(rawRecords);
             
-            // ソート用に「各キャラの数値データ」を事前に構造化して保持
+            // 名寄せされた後の「確定した代表名」ベースで全発言数を再集計する
+            const unifiedChatCounter = {};
+            // 名寄せロジックの簡易マッピングを再現
+            const uniqueNames = Object.keys(charMap).sort((a,b) => b.length - a.length);
+            
+            Object.keys(totalChatCounter).forEach(rawName => {
+                const unifiedName = uniqueNames.find(uName => rawName.includes(uName) || uName.includes(rawName)) || rawName;
+                unifiedChatCounter[unifiedName] = (unifiedChatCounter[unifiedName] || 0) + totalChatCounter[rawName];
+            });
+
             currentAnalysisData = {
                 totalCount: rawRecords.length,
                 characters: Object.keys(charMap).map(char => {
                     const charList = charMap[char];
                     const d100List = charList.filter(r => r.is1d100);
                     
-                    // クリティカル数・ファンブル数を集計
                     const criticalCount = d100List.filter(r => /クリティカル|決定的成功/.test(r.diceResult)).length;
                     const fumbleCount = d100List.filter(r => /ファンブル|致命的失敗/.test(r.diceResult)).length;
+
+                    // ★ 新・PCとNPCの自動判別ロジック
+                    const totalSpeech = unifiedChatCounter[char] || charList.length;
+                    const diceCount = charList.length;
+                    
+                    // KPやシステムメッセージ系は確実に除外
+                    const isSystemOrKP = /^(KP|GM|SYSTEM|システム|シークレット|進行)/i.test(char);
+                    
+                    // 秘匿タブ[HO1]などを使っている場合は無条件でPC
+                    const hasHOTab = charList.some(r => /HO\d+/i.test(r.channel));
+                    
+                    // ダイス発言率（ダイス数 ÷ 総発言数）
+                    // 敵NPCは会話をせずダイスだけ振るため、この比率が100%に近くなる
+                    // プレイヤー(PC)は会話(RP)が多いため、比率が適度に低くなる
+                    const diceRatio = diceCount / totalSpeech;
+
+                    let isPC = false;
+                    if (!isSystemOrKP) {
+                        if (hasHOTab) {
+                            isPC = true;
+                        } else if (d100List.length > 0 && diceRatio < 0.85) {
+                            // 1D100を1回以上振っており、かつ全発言のうちダイス以外（RPや雑談）が15%以上あるキャラクターをPCとする
+                            isPC = true;
+                        }
+                    }
 
                     return {
                         name: char,
                         list: charList,
                         d100List: d100List,
                         criticalCount: criticalCount,
-                        fumbleCount: fumbleCount
+                        fumbleCount: fumbleCount,
+                        isPC: isPC 
                     };
                 })
             };
 
-            // 初回は名前順でレポート生成
             generateReport('default');
         }
 
-        // ソート種別を指定してレポートを画面に出力する関数
         function generateReport(sortBy = 'default') {
             if (!currentAnalysisData) return;
 
@@ -302,124 +355,138 @@
             let html = `<div class="header-title">ココフォリア・ダイスログ分析レポート</div>`;
             html += `<div class="section-total">総ダイスロール回数: ${currentAnalysisData.totalCount} 回</div>`;
 
-            // ボタンエリアの追加
             html += `<div class="sort-actions">`;
             html += `  <button class="sort-btn ${sortBy==='default'?'active':''}" onclick="generateReport('default')">標準（名前順）</button>`;
             html += `  <button class="sort-btn ${sortBy==='critical'?'active':''}" onclick="generateReport('critical')">✨ クリティカルが多い順</button>`;
             html += `  <button class="sort-btn ${sortBy==='fumble'?'active':''}" onclick="generateReport('fumble')">💥 ファンブルが多い順</button>`;
             html += `</div>`;
 
-            const RESULT_ORDER = [
-                "クリティカル", "決決定的成功", "イクストリーム成功", "ハード成功", 
-                "スペシャル", "成功", "失敗", "致命的失敗", "ファンブル"
-            ];
-
-            // データのコピーを作ってソート処理
             let sortedChars = [...currentAnalysisData.characters];
             if (sortBy === 'critical') {
                 sortedChars.sort((a, b) => b.criticalCount - a.criticalCount || a.name.localeCompare(b.name, 'ja'));
             } else if (sortBy === 'fumble') {
                 sortedChars.sort((a, b) => b.fumbleCount - a.fumbleCount || a.name.localeCompare(b.name, 'ja'));
             } else {
-                // デフォルトは名前の五十音・アルファベット順
                 sortedChars.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
             }
 
-            // ループ処理で各キャラクターのHTMLを組み立て
-            sortedChars.forEach(charData => {
-                const char = charData.name;
-                const charList = charData.list;
-                const d100List = charData.d100List;
-                
-                html += `<div class="char-block">`;
-                html += `<h3 class="char-name">キャラクター: ${char}</h3>`;
-                html += `<div class="meta-info">`;
-                html += `  <div>・総ダイス数: <strong>${charList.length} 回</strong></div>`;
+            const pcCharacters = sortedChars.filter(c => c.isPC);
+            const npcCharacters = sortedChars.filter(c => !c.isPC);
 
-                if (d100List.length > 0) {
-                    const sum = d100List.reduce((acc, r) => acc + r.diceValue, 0);
-                    const avg = sum / d100List.length;
-                    html += `  <div>・1D100 平均出目: <strong>${avg.toFixed(2)}</strong> (低いほど出目が良い)</div>`;
-                    html += `  <div>・クリティカル総数: <span style="color:#2e7d32; font-weight:bold;">${charData.criticalCount} 回</span> / ファンブル総数: <span style="color:#c62828; font-weight:bold;">${charData.fumbleCount} 回</span></div>`;
-                    html += `</div>`; 
-
-                    const resultsCount = {};
-                    d100List.forEach(r => {
-                        resultsCount[r.diceResult] = (resultsCount[r.diceResult] || 0) + 1;
-                    });
-
-                    html += `<table class="grid-table">`;
-                    html += `  <thead><tr><th>判定結果</th><th>回数</th><th>割合 (%)</th></tr></thead>`;
-                    html += `  <tbody>`;
-
-                    const printedResults = new Set();
-
-                    RESULT_ORDER.forEach(resName => {
-                        Object.keys(resultsCount).forEach(k => {
-                            if (k.includes(resName) && !printedResults.has(k)) {
-                                const count = resultsCount[k];
-                                const pct = (count / d100List.length) * 100;
-                                
-                                let rowClass = "";
-                                if (/クリティカル|決定的成功/.test(k)) rowClass = ' class="highlight-good"';
-                                if (/ファンブル|致命的失敗/.test(k)) rowClass = ' class="highlight-bad"';
-
-                                html += `    <tr${rowClass}><td>${k}</td><td>${count}回</td><td>${pct.toFixed(1)}%</td></tr>`;
-                                printedResults.add(k);
-                            }
-                        });
-                    });
-
-                    Object.keys(resultsCount).forEach(k => {
-                        if (!printedResults.has(k)) {
-                            const count = resultsCount[k];
-                            const pct = (count / d100List.length) * 100;
-                            html += `    <tr><td>${k}</td><td>${count}回</td><td>${pct.toFixed(1)}%</td></tr>`;
-                        }
-                    });
-
-                    html += `  </tbody></table>`;
-
-                    const dramaticMoments = d100List.filter(r => 
-                        /クリティカル|決定的成功|ファンブル|致命的失敗/.test(r.diceResult)
-                    );
-
-                    if (dramaticMoments.length > 0) {
-                        html += `<div class="meta-info" style="margin-top:15px;">`;
-                        html += `  <strong>・クリティカル/ファンブル詳細:</strong>`;
-                        html += `  <ul>`;
-                        dramaticMoments.forEach(r => {
-                            html += `    <li>[${r.skillName}] 出目:${r.diceValue} ＞ ${r.diceResult}</li>`;
-                        });
-                        html += `  </ul>`;
-                        html += `</div>`;
-                    }
-                } else {
-                    html += `  <div>・1D100判定のログはありません(ダメージダイス等のみ)</div>`;
-                    html += `</div>`; 
-                }
-
-                const skillCount = {};
-                charList.forEach(r => {
-                    skillCount[r.skillName] = (skillCount[r.skillName] || 0) + 1;
+            if (pcCharacters.length > 0) {
+                html += `<div class="category-heading pc-type">🛡️ プレイヤーキャラクター (PC)</div>`;
+                pcCharacters.forEach(charData => {
+                    html += buildCharacterBlockHTML(charData);
                 });
-                const sortedSkills = Object.entries(skillCount).sort((a, b) => b[1] - a[1]).slice(0, 3);
-                
-                html += `<div class="meta-info">`;
-                html += `  <strong>・よく使用した技能/項目トップ3:</strong>`;
-                html += `  <ul>`;
-                sortedSkills.forEach(([sName, count]) => {
-                    html += `    <li>${sName}: ${count}回</li>`;
-                });
-                html += `  </ul>`;
-                html += `</div>`;
+            }
 
-                html += `</div>`; 
-            });
+            if (npcCharacters.length > 0) {
+                html += `<div class="category-heading">🎭 NPC / 敵・エネミー / その他</div>`;
+                npcCharacters.forEach(charData => {
+                    html += buildCharacterBlockHTML(charData);
+                });
+            }
 
             output.innerHTML = html;
             output.style.display = 'block';
             fileInfo.textContent = "解析が完了しました！";
+        }
+
+        function buildCharacterBlockHTML(charData) {
+            const RESULT_ORDER = [
+                "クリティカル", "決定的成功", "イクストリーム成功", "ハード成功", 
+                "スペシャル", "成功", "失敗", "致命的失敗", "ファンブル"
+            ];
+            
+            const char = charData.name;
+            const charList = charData.list;
+            const d100List = charData.d100List;
+            
+            let blockHtml = `<div class="char-block">`;
+            blockHtml += `<h3 class="char-name">${char}</h3>`;
+            blockHtml += `<div class="meta-info">`;
+            blockHtml += `  <div>・総ダイス数: <strong>${charList.length} 回</strong></div>`;
+
+            if (d100List.length > 0) {
+                const sum = d100List.reduce((acc, r) => acc + r.diceValue, 0);
+                const avg = sum / d100List.length;
+                blockHtml += `  <div>・1D100 平均出目: <strong>${avg.toFixed(2)}</strong> (低いほど出目が良い)</div>`;
+                blockHtml += `  <div>・クリティカル総数: <span style="color:#2e7d32; font-weight:bold;">${charData.criticalCount} 回</span> / ファンブル総数: <span style="color:#c62828; font-weight:bold;">${charData.fumbleCount} 回</span></div>`;
+                blockHtml += `</div>`; 
+
+                const resultsCount = {};
+                d100List.forEach(r => {
+                    resultsCount[r.diceResult] = (resultsCount[r.diceResult] || 0) + 1;
+                });
+
+                blockHtml += `<table class="grid-table">`;
+                blockHtml += `  <thead><tr><th>判定結果</th><th>回数</th><th>割合 (%)</th></tr></thead>`;
+                blockHtml += `  <tbody>`;
+
+                const printedResults = new Set();
+
+                RESULT_ORDER.forEach(resName => {
+                    Object.keys(resultsCount).forEach(k => {
+                        if (k.includes(resName) && !printedResults.has(k)) {
+                            const count = resultsCount[k];
+                            const pct = (count / d100List.length) * 100;
+                            
+                            let rowClass = "";
+                            if (/クリティカル|決定的成功/.test(k)) rowClass = ' class="highlight-good"';
+                            if (/ファンブル|致命的失敗/.test(k)) rowClass = ' class="highlight-bad"';
+
+                            blockHtml += `    <tr${rowClass}><td>${k}</td><td>${count}回</td><td>${pct.toFixed(1)}%</td></tr>`;
+                            printedResults.add(k);
+                        }
+                    });
+                });
+
+                Object.keys(resultsCount).forEach(k => {
+                    if (!printedResults.has(k)) {
+                        const count = resultsCount[k];
+                        const pct = (count / d100List.length) * 100;
+                        blockHtml += `    <tr><td>${k}</td><td>${count}回</td><td>${pct.toFixed(1)}%</td></tr>`;
+                    }
+                });
+
+                blockHtml += `  </tbody></table>`;
+
+                const dramaticMoments = d100List.filter(r => 
+                    /クリティカル|決定的成功|ファンブル|致命的失敗/.test(r.diceResult)
+                );
+
+                if (dramaticMoments.length > 0) {
+                    blockHtml += `<div class="meta-info" style="margin-top:15px;">`;
+                    blockHtml += `  <strong>・クリティカル/ファンブル詳細:</strong>`;
+                    blockHtml += `  <ul>`;
+                    dramaticMoments.forEach(r => {
+                        blockHtml += `    <li>[${r.skillName}] 出目:${r.diceValue} ＞ ${r.diceResult}</li>`;
+                    });
+                    blockHtml += `  </ul>`;
+                    blockHtml += `</div>`;
+                }
+            } else {
+                blockHtml += `  <div>・1D100判定のログはありません(ダメージダイス等のみ)</div>`;
+                blockHtml += `</div>`; 
+            }
+
+            const skillCount = {};
+            charList.forEach(r => {
+                skillCount[r.skillName] = (skillCount[r.skillName] || 0) + 1;
+            });
+            const sortedSkills = Object.entries(skillCount).sort((a, b) => b[1] - a[1]).slice(0, 3);
+            
+            blockHtml += `<div class="meta-info">`;
+            blockHtml += `  <strong>・よく使用した技能/項目トップ3:</strong>`;
+            blockHtml += `  <ul>`;
+            sortedSkills.forEach(([sName, count]) => {
+                blockHtml += `    <li>${sName}: ${count}回</li>`;
+            });
+            blockHtml += `  </ul>`;
+            blockHtml += `</div>`;
+
+            blockHtml += `</div>`; 
+            return blockHtml;
         }
     </script>
 </body>
